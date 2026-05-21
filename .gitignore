@@ -1,10 +1,19 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+# Credenciales
+.env
 
-# Virtual environments
-.venv
+# Entorno virtual
+.venv/
+env/
+venv/
+ENV/
+
+# Cache de OSMnx y Python
+cache/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Otros
+.DS_Store
+.vscode/
+src/tacna_provincia.graphml
