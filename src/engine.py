@@ -7,6 +7,11 @@ import os
 from pathlib import Path
 from ortools.constraint_solver import pywrapcp
 
+try:
+    from . import geo_utils
+except ImportError:
+    import geo_utils
+
 BASE_DIR = Path(__file__).resolve().parent
 MAP_FILE = BASE_DIR / "tacna_provincia.graphml"
 OVERPASS_URLS = [
@@ -129,49 +134,166 @@ def get_graph():
 
     G = ox.add_edge_speeds(G)
     G = ox.add_edge_travel_times(G)
+
+    def _apply_fixed_speed_and_curvature(G_work, speed_kph=10):
+        speed_ms = speed_kph / 3.6
+        for u, v, key, data in G_work.edges(keys=True, data=True):
+            length_m = data.get('length')
+            if length_m is None or length_m <= 0:
+                continue
+
+            curve_penalty = 1.0
+            geom = data.get('geometry')
+            if geom is not None and hasattr(geom, 'coords'):
+                coords = list(geom.coords)
+                if len(coords) > 2:
+                    lon0, lat0 = coords[0]
+                    lon1, lat1 = coords[-1]
+                    lat_avg = np.deg2rad((lat0 + lat1) / 2)
+                    dx = (lon1 - lon0) * 111320.0 * np.cos(lat_avg)
+                    dy = (lat1 - lat0) * 111320.0
+                    straight_m = np.hypot(dx, dy)
+                    if straight_m > 0:
+                        curve_factor = max(1.0, length_m / straight_m)
+                        curve_penalty = 1.0 + min(0.8, max(0.0, curve_factor - 1.0) * 0.5)
+
+            travel_time = length_m / speed_ms * curve_penalty
+            data['travel_time'] = travel_time
+            data['speed_kph'] = speed_kph
+
+    _apply_fixed_speed_and_curvature(G, speed_kph=10)
     G = ox.truncate.largest_component(G, strongly=True)
 
     ox.save_graphml(G, str(MAP_FILE))
     return G
+
+
+def _project_point_on_graph(G_work, raw_point, node_id):
+    lat, lon = geo_utils.ensure_latlon(raw_point)
+    u, v, key = ox.nearest_edges(G_work, lon, lat)
+    edge_data = G_work.get_edge_data(u, v, key)
+    p_real = Point(lon, lat)
+
+    full_geom = edge_data.get(
+        'geometry',
+        LineString([
+            (G_work.nodes[u]['x'], G_work.nodes[u]['y']),
+            (G_work.nodes[v]['x'], G_work.nodes[v]['y'])
+        ])
+    )
+    dist_p = full_geom.project(p_real)
+    p_proy = full_geom.interpolate(dist_p)
+
+    G_work.add_node(node_id, x=p_proy.x, y=p_proy.y)
+
+    coords = list(full_geom.coords)
+    idx_corte = 0
+    for k in range(len(coords) - 1):
+        if LineString([coords[k], coords[k + 1]]).distance(p_proy) < 1e-8:
+            idx_corte = k + 1
+            break
+
+    geom_u = LineString(coords[:idx_corte] + [(p_proy.x, p_proy.y)])
+    geom_v = LineString([(p_proy.x, p_proy.y)] + coords[idx_corte:])
+
+    if G_work.has_edge(u, v, key):
+        G_work.remove_edge(u, v, key)
+
+    speed = edge_data.get('speed_kph', 30)
+    len_u = geom_u.length * 111320
+    len_v = geom_v.length * 111320
+    time_u = len_u / (speed / 3.6)
+    time_v = len_v / (speed / 3.6)
+
+    G_work.add_edge(u, node_id, geometry=geom_u, length=len_u, travel_time=time_u)
+    G_work.add_edge(node_id, v, geometry=geom_v, length=len_v, travel_time=time_v)
+
+    if not edge_data.get('oneway', False):
+        if G_work.has_edge(v, u, key):
+            G_work.remove_edge(v, u, key)
+        G_work.add_edge(v, node_id, geometry=geom_v.reverse(), length=len_v, travel_time=time_v)
+        G_work.add_edge(node_id, u, geometry=geom_u.reverse(), length=len_u, travel_time=time_u)
+
+    return node_id
+
+
+def _path_to_coords(G_work, path):
+    coords = []
+    for k in range(len(path) - 1):
+        edge_data = G_work.get_edge_data(path[k], path[k + 1], 0)
+        if edge_data and 'geometry' in edge_data:
+            tramo = [(c[1], c[0]) for c in edge_data['geometry'].coords]
+            if coords and tramo and coords[-1] == tramo[0]:
+                coords.extend(tramo[1:])
+            else:
+                coords.extend(tramo)
+        else:
+            coords.append((G_work.nodes[path[k]]['y'], G_work.nodes[path[k]]['x']))
+
+    if path:
+        coords.append((G_work.nodes[path[-1]]['y'], G_work.nodes[path[-1]]['x']))
+
+    deduplicated = []
+    for coord in coords:
+        if not deduplicated or deduplicated[-1] != coord:
+            deduplicated.append(coord)
+    return deduplicated
+
+
+def compute_route_segment(G, origen_latlon, destino_latlon):
+    if G is None:
+        return [], 0, 0
+
+    G_work = G.copy()
+    origen_id = 990000
+    destino_id = 990001
+
+    try:
+        _project_point_on_graph(G_work, origen_latlon, origen_id)
+        _project_point_on_graph(G_work, destino_latlon, destino_id)
+
+        path = nx.shortest_path(G_work, origen_id, destino_id, weight='travel_time')
+        tiempo_seg = nx.shortest_path_length(G_work, origen_id, destino_id, weight='travel_time')
+        dist_seg = nx.shortest_path_length(G_work, origen_id, destino_id, weight='length')
+        coords = _path_to_coords(G_work, path)
+        return coords, tiempo_seg, dist_seg
+    except Exception:
+        return [], 0, 0
+
+
+def compute_operational_route(G, posta_latlon, incidente_latlon, destino_latlon):
+    coords_a, tiempo_a, dist_a = compute_route_segment(G, posta_latlon, incidente_latlon)
+    coords_b, tiempo_b, dist_b = compute_route_segment(G, incidente_latlon, destino_latlon)
+    coords_c, tiempo_c, dist_c = compute_route_segment(G, destino_latlon, posta_latlon)
+    return {
+        "segmento_a": {
+            "coords": coords_a,
+            "tiempo_seg": tiempo_a,
+            "dist_seg": dist_a,
+        },
+        "segmento_b": {
+            "coords": coords_b,
+            "tiempo_seg": tiempo_b,
+            "dist_seg": dist_b,
+        },
+        "segmento_c": {
+            "coords": coords_c,
+            "tiempo_seg": tiempo_c,
+            "dist_seg": dist_c,
+        },
+        "tiempo_total_seg": tiempo_a + tiempo_b + tiempo_c,
+        "dist_total_seg": dist_a + dist_b + dist_c,
+    }
 
 def resolver_tsp_pro(G, puntos_reales, con_traza=False):
     if len(puntos_reales) < 2:
         return ([], 0, [], None) if con_traza else ([], 0, [])
     G_work = G.copy()
     n_ids = []
-    
-    for i, (lat, lon) in enumerate(puntos_reales):
-        u, v, key = ox.nearest_edges(G_work, lon, lat)
-        edge_data = G_work.get_edge_data(u, v, key)
-        p_real = Point(lon, lat)
-        
-        full_geom = edge_data.get('geometry', LineString([(G_work.nodes[u]['x'], G_work.nodes[u]['y']), (G_work.nodes[v]['x'], G_work.nodes[v]['y'])]))
-        dist_p = full_geom.project(p_real)
-        p_proy = full_geom.interpolate(dist_p)
-        
-        n_id = 990000 + i
-        G_work.add_node(n_id, x=p_proy.x, y=p_proy.y)
-        
-        coords = list(full_geom.coords)
-        idx_corte = 0
-        for k in range(len(coords)-1):
-            if LineString([coords[k], coords[k+1]]).distance(p_proy) < 1e-8:
-                idx_corte = k + 1
-                break
-        
-        geom_u = LineString(coords[:idx_corte] + [(p_proy.x, p_proy.y)])
-        geom_v = LineString([(p_proy.x, p_proy.y)] + coords[idx_corte:])
 
-        if G_work.has_edge(u, v, key): G_work.remove_edge(u, v, key)
-        speed = edge_data.get('speed_kph', 30)
-        G_work.add_edge(u, n_id, geometry=geom_u, length=geom_u.length*111320, travel_time=(geom_u.length*111320)/(speed/3.6))
-        G_work.add_edge(n_id, v, geometry=geom_v, length=geom_v.length*111320, travel_time=(geom_v.length*111320)/(speed/3.6))
-        
-        if not edge_data.get('oneway', False):
-            if G_work.has_edge(v, u, key): G_work.remove_edge(v, u, key)
-            G_work.add_edge(v, n_id, geometry=geom_v.reverse(), length=geom_v.length*111320, travel_time=(geom_v.length*111320)/(speed/3.6))
-            G_work.add_edge(n_id, u, geometry=geom_u.reverse(), length=geom_u.length*111320, travel_time=(geom_u.length*111320)/(speed/3.6))
-        n_ids.append(n_id)
+    for i, raw in enumerate(puntos_reales):
+        n_id = 990000 + i
+        n_ids.append(_project_point_on_graph(G_work, raw, n_id))
 
     n = len(n_ids)
     matriz_tiempo = np.zeros((n, n))

@@ -198,15 +198,8 @@ AS $$
             CASE
                 WHEN p_tipo_incidente = 'menor' AND c.tipo = 'posta_basica' THEN 0
                 WHEN p_tipo_incidente = 'menor' AND c.tipo = 'posta_avanzada' THEN 1
-                WHEN p_tipo_incidente = 'mayor' AND c.tipo = 'hospital' AND (
-                    lower(c.nombre) LIKE '%essalud%'
-                    OR lower(c.nombre) LIKE '%seguro social%'
-                    OR lower(c.nombre) LIKE '%referencia%'
-                    OR lower(c.nombre) LIKE '%regional%'
-                    OR lower(c.nombre) LIKE '%general%'
-                ) THEN 0
-                WHEN p_tipo_incidente = 'mayor' AND c.tipo = 'hospital' THEN 1
-                WHEN p_tipo_incidente = 'mayor' AND c.tipo = 'posta_avanzada' THEN 2
+                WHEN p_tipo_incidente = 'mayor' AND c.tipo = 'hospital' THEN 0
+                WHEN p_tipo_incidente = 'mayor' AND c.tipo = 'clinica' THEN 1
                 ELSE 3
             END AS prioridad
         FROM cercanas c
@@ -245,6 +238,8 @@ DECLARE
     v_origen RECORD;
     v_destino RECORD;
     v_ambulancia RECORD;
+    v_lat numeric;
+    v_lon numeric;
 BEGIN
     SELECT *
     INTO v_incidente
@@ -262,11 +257,16 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Extraer lat/lon desde el campo point (texto: '(lon,lat)')
+    v_lon := split_part(trim(both '()' from v_incidente.ubicacion::text), ',', 1)::numeric;
+    v_lat := split_part(trim(both '()' from v_incidente.ubicacion::text), ',', 2)::numeric;
+
+    -- Obtener destino óptimo: la función espera (p_lat, p_lon, tipo)
     SELECT *
     INTO v_destino
     FROM public.obtener_posta_destino_optima(
-        split_part(trim(both '()' from v_incidente.ubicacion::text), ',', 1)::numeric,
-        split_part(trim(both '()' from v_incidente.ubicacion::text), ',', 2)::numeric,
+        v_lat,
+        v_lon,
         v_incidente.tipo
     );
 
@@ -275,11 +275,12 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Buscar postas cercanas: obtener_postas_cercanas espera (p_lat, p_lon, radio)
     FOR v_origen IN
         SELECT *
         FROM public.obtener_postas_cercanas(
-            split_part(trim(both '()' from v_incidente.ubicacion::text), ',', 1)::numeric,
-            split_part(trim(both '()' from v_incidente.ubicacion::text), ',', 2)::numeric,
+            v_lat,
+            v_lon,
             CASE WHEN v_incidente.tipo = 'mayor' THEN 10 ELSE 5 END
         )
     LOOP
@@ -403,6 +404,65 @@ BEGIN
     FROM zonas_detectadas;
 
     RETURN QUERY SELECT v_semaforos, v_tiempo_semaforos, v_factor, v_zonas;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.fn_horarios_pico_activos(p_horarios jsonb)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(COALESCE(p_horarios, '[]'::jsonb)) AS horario
+        WHERE (
+            (horario->>'inicio')::time <= (horario->>'fin')::time
+            AND CURRENT_TIME BETWEEN (horario->>'inicio')::time AND (horario->>'fin')::time
+        ) OR (
+            -- caso de cruce de día: p.ej. inicio 22:00, fin 06:00
+            (horario->>'inicio')::time > (horario->>'fin')::time
+            AND (CURRENT_TIME >= (horario->>'inicio')::time OR CURRENT_TIME <= (horario->>'fin')::time)
+        )
+    );
+$$;
+
+-- ============================================================================
+-- REGISTRAR RETORNO DE AMBULANCIA
+-- ============================================================================
+CREATE OR REPLACE FUNCTION public.registrar_retorno_ambulancia(
+    p_ambulancia_id uuid,
+    p_incidente_id uuid DEFAULT NULL
+)
+RETURNS TABLE(ok boolean, mensaje text)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_ambulancias ambulancias%ROWTYPE;
+BEGIN
+    SELECT * INTO v_ambulancias
+    FROM ambulancias
+    WHERE id = p_ambulancia_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT false, 'Ambulancia no encontrada'::text;
+        RETURN;
+    END IF;
+
+    -- Marcar que la ambulancia ha regresado al puesto (puede ajustarse a 'disponible' si se desea)
+    UPDATE ambulancias
+    SET estado = 'en_posta',
+        ultima_actualizacion = NOW()
+    WHERE id = p_ambulancia_id;
+
+    -- Si se pasó incidente, cerrarlo (opcional según workflow)
+    IF p_incidente_id IS NOT NULL THEN
+        UPDATE incidentes
+        SET estado = 'cerrado'
+        WHERE id = p_incidente_id;
+    END IF;
+
+    RETURN QUERY SELECT true, 'Retorno registrado correctamente'::text;
 END;
 $$;
 
