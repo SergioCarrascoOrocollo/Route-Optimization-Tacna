@@ -92,8 +92,6 @@ SUPABASE_URL=https://tu-proyecto.supabase.co
 SUPABASE_KEY=tu-anon-key-aqui
 ```
 
-> ⚠️ **Nunca subas el `.env` al repositorio.** Ya está en `.gitignore`.
-
 ---
 
 ## 🚀 Ejecución
@@ -207,8 +205,3 @@ P(aceptar) = exp(-ΔC / T)     si ΔC ≥ 0  (empeoramiento)
 | Bryanna Audrey Chavez Bautista   | Diseño inicial del sistema y lógica de despacho            |
 | Sergio Gabriel Carrasco Orocollo | Integración de módulos y conexión del sistema              |
 
----
-
-## 📄 Licencia
-
-Uso académico — Universidad Nacional Jorge Basadre Grohmann, 2026.
