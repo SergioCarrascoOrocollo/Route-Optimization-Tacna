@@ -1,0 +1,7 @@
+Caso,Tipo,N_Puntos,Costo_SA_seg,Costo_SA_min,Costo_Greedy_seg,Costo_Greedy_min,Mejora_pct,Dist_km,Tiempo_ejec_ms,Iteraciones,Descripcion
+Grave-1,Grave,3,686.93,11.45,1373.28,22.89,49.98,1.906,2.2,650,Accidente vial - Av. Bolognesi (3 puntos)
+Grave-2,Grave,4,1424.2,23.74,2097.32,34.96,32.09,3.95,2.9,650,Emergencia cardiaca - Zona Alto Lima (4 puntos)
+Grave-3,Grave,5,2164.33,36.07,3891.75,64.86,44.39,5.999,3.5,650,Politraumatismo - Calana (5 puntos)
+Leve-1,Leve,2,212.02,3.53,522.55,8.71,59.43,0.589,0.0,0,Consulta domiciliaria - Centro Historico (2 puntos)
+Leve-2,Leve,3,567.05,9.45,861.08,14.35,34.15,1.573,4.3,650,Traslado menor - Pocollay (3 puntos)
+Leve-3,Leve,3,1345.95,22.43,2688.16,44.8,49.93,3.722,4.6,650,Evaluacion rutinaria - Gregorio Albarracin (3 puntos)
